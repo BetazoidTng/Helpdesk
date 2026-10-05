@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f1f5f9">
+<title>Remote Assist - Helpdesk</title>
+<link rel="stylesheet" href="/css/style.css">
+<style>
+    #remote-video { width: 100%; max-height: 70vh; background: #111; border-radius: 8px; display: block; cursor: none; }
+    #remote-video.controllable { cursor: crosshair; }
+    .ra-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+    @media (min-width: 900px) {
+        .ra-grid { grid-template-columns: 2.2fr 1fr; }
+    }
+    .ra-code { font-size: 1.8rem; letter-spacing: 0.15em; font-weight: 700; font-family: monospace; }
+    .ra-chat-log { height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 0.85rem; background: #fff; }
+    .ra-chat-log .msg { margin-bottom: 6px; }
+    .ra-chat-log .msg strong { color: var(--accent); }
+    .ra-status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: #9ca3af; }
+    .ra-status-dot.connected { background: #16a34a; }
+    .ra-status-dot.error { background: var(--danger); }
+</style>
+</head>
+<body>
+<nav>
+    <a class="brand" href="/queue.html"><img src="/img/logo.png" alt="Bearing Services Africa"></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-label="Menu">&#9776;</button>
+    <div class="links" id="nav-links"></div>
+</nav>
+
+<main>
+    <p class="meta"><a href="#" id="back-link">&larr; Back to ticket</a></p>
+    <div id="ra-root"><p class="meta">Loading...</p></div>
+</main>
+
+<script src="/js/util.js"></script>
+<script src="/js/nav.js"></script>
+<script>
+const params = new URLSearchParams(window.location.search);
+const sessionId = params.get('sessionId');
+const code = (params.get('code') || '').toUpperCase();
+const ticketId = params.get('ticketId');
+const ticketNumber = params.get('ticketNumber') || '';
+
+document.getElementById('back-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.location.href = ticketId ? `/ticket.html?id=${ticketId}` : '/queue.html';
+});
+
+let ws = null;
+let pc = null;
+let dataChannel = null;
+let remoteScreenSize = null;
+let controlEnabled = false;
+let pendingIce = [];
+let ended = false;
+
+function setStatus(text, kind) {
+    const el = document.getElementById('ra-status-text');
+    const dot = document.getElementById('ra-status-dot');
+    if (el) el.textContent = text;
+    if (dot) dot.className = 'ra-status-dot' + (kind ? ' ' + kind : '');
+}
+
+function appendChat(author, text) {
+    const log = document.getElementById('ra-chat-log');
+    if (!log) return;
+    const row = document.createElement('div');
+    row.className = 'msg';
+    row.innerHTML = `<strong>${escapeHtml(author)}:</strong> ${escapeHtml(text)}`;
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+}
+
+function wsUrl() {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${window.location.host}/remote-assist/signal?code=${encodeURIComponent(code)}&role=staff`;
+}
+
+function sendToRelay(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function connectSignaling() {
+    ws = new WebSocket(wsUrl());
+    ws.addEventListener('open', () => setStatus('Waiting for the customer to connect...'));
+    ws.addEventListener('close', (e) => {
+        if (!ended) setStatus(`Disconnected from the relay (code ${e.code}). Refresh to retry.`, 'error');
+    });
+    ws.addEventListener('error', () => setStatus('Could not reach the signaling server.', 'error'));
+    ws.addEventListener('message', (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (err) { return; }
+        handleSignalMessage(msg);
+    });
+}
+
+function handleSignalMessage(msg) {
+    if (msg.type === 'peer-joined' || msg.type === 'peer-present') {
+        if (msg.role === 'agent') setStatus('Customer connected -- establishing video...');
+    } else if (msg.type === 'peer-left') {
+        if (msg.role === 'agent') {
+            setStatus('Customer disconnected.');
+            teardownPeerConnection();
+        }
+    } else if (msg.type === 'session-ended') {
+        ended = true;
+        setStatus('Session ended.');
+        teardownPeerConnection();
+        if (ws) ws.close();
+    } else if (msg.type === 'signal' && msg.from === 'agent') {
+        let inner;
+        try { inner = JSON.parse(msg.data); } catch (err) { return; }
+        handleAgentSignal(inner);
+    }
+}
+
+function ensurePeerConnection() {
+    if (pc) return pc;
+    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    pc.ontrack = (e) => {
+        const video = document.getElementById('remote-video');
+        if (video) video.srcObject = e.streams[0];
+        setStatus('Connected.', 'connected');
+    };
+    pc.onicecandidate = (e) => {
+        if (e.candidate) sendToRelay({ type: 'ice', candidate: e.candidate });
+    };
+    pc.ondatachannel = (e) => {
+        dataChannel = e.channel;
+        wireDataChannel();
+    };
+    pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+            setStatus(`Connection ${pc.connectionState}.`, 'error');
+        }
+    };
+    return pc;
+}
+
+async function handleAgentSignal(inner) {
+    if (inner.type === 'denied') {
+        setStatus('The customer declined the request to share their screen.', 'error');
+        return;
+    }
+    if (inner.type === 'hello') {
+        remoteScreenSize = { width: inner.width, height: inner.height };
+        return;
+    }
+    if (inner.type === 'offer') {
+        ensurePeerConnection();
+        await pc.setRemoteDescription(new RTCSessionDescription(inner.sdp));
+        for (const candidate of pendingIce) {
+            await pc.addIceCandidate(candidate).catch(() => {});
+        }
+        pendingIce = [];
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sendToRelay({ type: 'answer', sdp: pc.localDescription });
+        return;
+    }
+    if (inner.type === 'ice') {
+        if (pc && pc.remoteDescription) {
+            await pc.addIceCandidate(inner.candidate).catch(() => {});
+        } else {
+            pendingIce.push(inner.candidate);
+        }
+    }
+}
+
+function teardownPeerConnection() {
+    if (pc) {
+        try { pc.close(); } catch (err) { /* already closed */ }
+        pc = null;
+    }
+    dataChannel = null;
+    const video = document.getElementById('remote-video');
+    if (video) video.srcObject = null;
+    setControlEnabled(false);
+}
+
+function wireDataChannel() {
+    dataChannel.addEventListener('message', (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch (err) { return; }
+        if (msg.type === 'chat') appendChat('Customer', msg.text);
+    });
+}
+
+function sendControl(obj) {
+    if (dataChannel && dataChannel.readyState === 'open' && controlEnabled) {
+        dataChannel.send(JSON.stringify(obj));
+    }
+}
+
+function setControlEnabled(value) {
+    controlEnabled = value;
+    const btn = document.getElementById('control-toggle');
+    const video = document.getElementById('remote-video');
+    if (btn) btn.textContent = controlEnabled ? 'Release control' : 'Take control';
+    if (video) video.classList.toggle('controllable', controlEnabled);
+}
+
+function scaleCoords(e) {
+    const video = document.getElementById('remote-video');
+    const rect = video.getBoundingClientRect();
+    const relX = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const relY = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    const size = remoteScreenSize || { width: video.videoWidth || 1920, height: video.videoHeight || 1080 };
+    return { x: Math.round(relX * size.width), y: Math.round(relY * size.height) };
+}
+
+function wireVideoControls() {
+    const video = document.getElementById('remote-video');
+    video.addEventListener('mousemove', (e) => {
+        const { x, y } = scaleCoords(e);
+        sendControl({ type: 'mousemove', x, y });
+    });
+    video.addEventListener('mousedown', (e) => {
+        const { x, y } = scaleCoords(e);
+        sendControl({ type: 'mousedown', x, y, button: e.button });
+        if (controlEnabled) e.preventDefault();
+    });
+    video.addEventListener('mouseup', (e) => {
+        const { x, y } = scaleCoords(e);
+        sendControl({ type: 'mouseup', x, y, button: e.button });
+    });
+    video.addEventListener('wheel', (e) => {
+        if (!controlEnabled) return;
+        sendControl({ type: 'scroll', deltaX: e.deltaX, deltaY: e.deltaY });
+        e.preventDefault();
+    }, { passive: false });
+    video.addEventListener('contextmenu', (e) => { if (controlEnabled) e.preventDefault(); });
+
+    document.addEventListener('keydown', (e) => {
+        if (!controlEnabled) return;
+        if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+        sendControl({ type: 'keydown', key: e.key, code: e.code });
+        e.preventDefault();
+    });
+    document.addEventListener('keyup', (e) => {
+        if (!controlEnabled) return;
+        if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+        sendControl({ type: 'keyup', key: e.key, code: e.code });
+        e.preventDefault();
+    });
+}
+
+async function render() {
+    const root = document.getElementById('ra-root');
+    try {
+        const me = await fetchJson('/api/auth/me');
+        const staff = me.user && (me.user.role === 'Admin' || me.user.role === 'Agent');
+        if (!staff) {
+            root.innerHTML = `<p class="error">Remote Assist is only available to Admin/Agent staff.</p>`;
+            return;
+        }
+    } catch (err) {
+        root.innerHTML = `<p class="error">${escapeHtml(err.message)}</p>`;
+        return;
+    }
+
+    if (!sessionId || !code) {
+        root.innerHTML = `<p class="error">Missing session details -- start a remote session from the ticket page.</p>`;
+        return;
+    }
+
+    root.innerHTML = `
+        <div class="panel">
+            <h1>Remote Assist${ticketNumber ? `: ${escapeHtml(ticketNumber)}` : ''}</h1>
+            <p class="meta"><span class="ra-status-dot" id="ra-status-dot"></span><span id="ra-status-text">Connecting...</span></p>
+            <div class="ra-grid">
+                <div>
+                    <video id="remote-video" autoplay playsinline></video>
+                </div>
+                <div>
+                    <div class="panel" style="margin:0;">
+                        <p class="meta" style="margin-top:0;">Give the customer this code and ask them to open the Remote Assist Agent app, enter it, and click Connect.</p>
+                        <p class="ra-code">${escapeHtml(code)}</p>
+                        <button class="btn small secondary" id="copy-code-btn" type="button">Copy code</button>
+                    </div>
+                    <div class="panel">
+                        <button class="btn small" id="control-toggle" type="button">Take control</button>
+                        <p class="meta">Mouse and keyboard only go through while control is taken. The customer always sees a clear on-screen notice that a session is active and can end it from their side at any time.</p>
+                        <button class="btn small danger" id="end-session-btn" type="button" style="margin-top:6px;">End session</button>
+                    </div>
+                    <div class="panel">
+                        <label for="ra-chat-input" style="margin-top:0;">Chat</label>
+                        <div class="ra-chat-log" id="ra-chat-log"></div>
+                        <div style="display:flex;gap:6px;margin-top:8px;">
+                            <input type="text" id="ra-chat-input" placeholder="Message the customer..." style="margin:0;">
+                            <button class="btn small" id="ra-chat-send" type="button">Send</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('copy-code-btn').addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(code);
+            document.getElementById('copy-code-btn').textContent = 'Copied!';
+            setTimeout(() => { document.getElementById('copy-code-btn').textContent = 'Copy code'; }, 1500);
+        } catch (err) { /* clipboard unavailable -- the code is shown on screen regardless */ }
+    });
+
+    document.getElementById('control-toggle').addEventListener('click', () => setControlEnabled(!controlEnabled));
+
+    document.getElementById('end-session-btn').addEventListener('click', async () => {
+        if (!window.confirm('End this remote assist session?')) return;
+        ended = true;
+        try { await fetchJson(`/api/remote-assist/sessions/${sessionId}/end`, { method: 'POST' }); } catch (err) { /* best effort */ }
+        teardownPeerConnection();
+        if (ws) ws.close();
+        setStatus('Session ended.');
+    });
+
+    document.getElementById('ra-chat-send').addEventListener('click', sendChat);
+    document.getElementById('ra-chat-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendChat();
+    });
+
+    wireVideoControls();
+    connectSignaling();
+}
+
+function sendChat() {
+    const input = document.getElementById('ra-chat-input');
+    const text = input.value.trim();
+    if (!text) return;
+    if (dataChannel && dataChannel.readyState === 'open') {
+        dataChannel.send(JSON.stringify({ type: 'chat', text }));
+        appendChat('You', text);
+        input.value = '';
+    }
+}
+
+window.addEventListener('beforeunload', () => {
+    ended = true;
+    if (pc) try { pc.close(); } catch (err) { /* ignore */ }
+    if (ws) try { ws.close(); } catch (err) { /* ignore */ }
+});
+
+render();
+</script>
+</body>
+</html>

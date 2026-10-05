@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f1f5f9">
+<title>Setup - Helpdesk</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav>
+    <a class="brand" href="/setup.html"><img src="/img/logo.png" alt="Bearing Services Africa"></a>
+</nav>
+
+<main class="narrow">
+    <h1>First-time setup</h1>
+    <p class="subtitle">Create the first Admin account for this helpdesk. More Admins and Agents can be added afterward from Admin &rarr; Users.</p>
+
+    <div class="panel" id="setup-panel">
+        <p class="meta">Loading...</p>
+    </div>
+</main>
+
+<script>
+async function init() {
+    const panel = document.getElementById('setup-panel');
+    let status;
+    try {
+        const res = await fetch('/api/setup/status');
+        status = await res.json();
+    } catch (err) {
+        panel.innerHTML = '<p class="error">Could not reach the server. Is it running?</p>';
+        return;
+    }
+
+    if (!status.needsSetup) {
+        panel.innerHTML = `
+            <p>Setup has already been completed for this helpdesk.</p>
+            <p class="meta">Ask an Admin for an account, or if you're the Admin, <a href="/login.html">log in here</a>.</p>
+        `;
+        return;
+    }
+
+    panel.innerHTML = `
+        <form id="setup-form">
+            <label for="fullName">Full name</label>
+            <input type="text" id="fullName" name="fullName" required autofocus>
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required>
+            <label for="email">Email</label>
+            <input type="email" id="email" name="email" required>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" minlength="8" required>
+            <p class="meta">At least 8 characters.</p>
+            <p class="error" id="form-error" style="display:none;"></p>
+            <button class="btn" type="submit" style="margin-top:10px;width:100%;">Create Admin account</button>
+        </form>
+    `;
+
+    document.getElementById('setup-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errorEl = document.getElementById('form-error');
+        errorEl.style.display = 'none';
+        const body = Object.fromEntries(new FormData(e.target).entries());
+
+        const res = await fetch('/api/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            credentials: 'same-origin',
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+            errorEl.textContent = data.error || 'Setup failed.';
+            errorEl.style.display = 'block';
+            return;
+        }
+
+        panel.innerHTML = `
+            <p class="success-msg">Admin account created.</p>
+            <a class="btn" href="/login.html">Log in now</a>
+        `;
+    });
+}
+
+init();
+</script>
+</body>
+</html>

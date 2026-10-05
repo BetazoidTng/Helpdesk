@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f1f5f9">
+<title>My Tickets - Helpdesk</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav>
+    <a class="brand" href="/portal.html"><img src="/img/logo.png" alt="Bearing Services Africa"></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-label="Menu">&#9776;</button>
+    <div class="links" id="nav-links"></div>
+</nav>
+
+<main>
+    <h1>My Tickets</h1>
+    <p class="subtitle">Submit a new request or track one you've already raised.</p>
+
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="list">My Tickets</button>
+        <button class="tab-btn" data-tab="submit">Submit a Ticket</button>
+    </div>
+
+    <div id="tab-list">
+        <div class="panel">
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Priority</th><th>Updated</th></tr>
+                    </thead>
+                    <tbody id="tickets-body">
+                        <tr><td colspan="5" class="meta">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="tab-submit" style="display:none;">
+        <div class="panel" style="max-width:560px;">
+            <form id="submit-form">
+                <label for="subject">Subject</label>
+                <input type="text" id="subject" name="subject" required autofocus>
+                <label for="categoryId">Category</label>
+                <select id="categoryId" name="categoryId"><option value="">Loading...</option></select>
+                <label for="priority">Priority</label>
+                <select id="priority" name="priority">
+                    <option value="Low">Low</option>
+                    <option value="Medium" selected>Medium</option>
+                    <option value="High">High</option>
+                    <option value="Urgent">Urgent</option>
+                </select>
+                <label for="description">Describe the issue</label>
+                <textarea id="description" name="description" rows="6" required></textarea>
+                <label for="attachments">Attachments (optional)</label>
+                <input type="file" id="attachments" name="attachments" multiple>
+                <p class="paste-hint">Tip: you can paste a screenshot (Ctrl+V / Cmd+V) into the description box above instead of attaching a file.</p>
+                <div class="paste-preview" id="attachments-preview" style="display:none;"></div>
+                <p class="error" id="form-error" style="display:none;"></p>
+                <p class="success-msg" id="form-success" style="display:none;"></p>
+                <button class="btn" type="submit" style="margin-top:14px;">Submit ticket</button>
+            </form>
+        </div>
+    </div>
+</main>
+
+<script src="/js/util.js"></script>
+<script src="/js/nav.js"></script>
+<script>
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-list').style.display = btn.dataset.tab === 'list' ? 'block' : 'none';
+        document.getElementById('tab-submit').style.display = btn.dataset.tab === 'submit' ? 'block' : 'none';
+    });
+});
+
+async function loadTickets() {
+    const body = document.getElementById('tickets-body');
+    try {
+        const data = await fetchJson('/api/tickets');
+        if (data.tickets.length === 0) {
+            body.innerHTML = '<tr><td colspan="5" class="meta">No tickets yet.</td></tr>';
+            return;
+        }
+        body.innerHTML = data.tickets.map((t) => `
+            <tr>
+                <td><a class="row-link" href="/ticket.html?id=${t.Id}">${escapeHtml(t.TicketNumber)}</a></td>
+                <td><a class="row-link" href="/ticket.html?id=${t.Id}">${escapeHtml(t.Subject)}</a></td>
+                <td>${statusBadge(t.Status)}</td>
+                <td>${priorityBadge(t.Priority)}</td>
+                <td class="meta">${formatDateTime(t.UpdatedAt)}</td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="5" class="error">${escapeHtml(err.message)}</td></tr>`;
+    }
+}
+
+async function loadCategories() {
+    const select = document.getElementById('categoryId');
+    try {
+        const data = await fetchJson('/api/categories');
+        select.innerHTML = '<option value="">(none)</option>' +
+            data.categories.map((c) => `<option value="${c.Id}">${escapeHtml(c.Name)}</option>`).join('');
+    } catch (err) {
+        select.innerHTML = '<option value="">(none)</option>';
+    }
+}
+
+const pasteAttachments = setupPasteAttachments({
+    pasteTarget: document.getElementById('description'),
+    fileInputId: 'attachments',
+    previewId: 'attachments-preview',
+    maxFiles: 5,
+});
+
+document.getElementById('submit-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('form-error');
+    const successEl = document.getElementById('form-success');
+    errorEl.style.display = 'none';
+    successEl.style.display = 'none';
+
+    const form = new FormData(e.target);
+    pasteAttachments.appendTo(form);
+    try {
+        const res = await fetch('/api/tickets', { method: 'POST', body: form, credentials: 'same-origin' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Failed to submit ticket.');
+        successEl.textContent = `Ticket ${data.ticketNumber} created.`;
+        successEl.style.display = 'block';
+        e.target.reset();
+        pasteAttachments.reset();
+        loadTickets();
+        document.querySelector('.tab-btn[data-tab="list"]').click();
+    } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.style.display = 'block';
+    }
+});
+
+loadTickets();
+loadCategories();
+</script>
+</body>
+</html>
