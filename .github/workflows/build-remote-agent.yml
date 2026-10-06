@@ -9,6 +9,7 @@
 # finished installer.msi and .pkg show up as downloadable workflow
 # artifacts (Actions run -> "Artifacts" at the bottom) -- not published
 # anywhere public, and not code-signed (see the README for that step).
+# test
 name: Build Remote Assist Agent installers
 
 on:
