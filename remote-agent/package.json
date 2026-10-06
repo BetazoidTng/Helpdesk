@@ -1,0 +1,25 @@
+{
+  "name": "helpdesk-remote-assist-agent",
+  "version": "1.0.0",
+  "description": "Customer-side desktop app for Helpdesk's Remote Assist feature -- shares this computer's screen with a support agent and lets them control the mouse/keyboard once you allow it.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.bsa.helpdesk.remoteassistagent",
+    "productName": "Helpdesk Remote Assist Agent",
+    "files": ["main.js", "preload.js", "inputInjector.js", "renderer/**/*"],
+    "win": { "target": "msi" },
+    "mac": { "target": "pkg" },
+    "linux": { "target": "AppImage" }
+  }
+}
